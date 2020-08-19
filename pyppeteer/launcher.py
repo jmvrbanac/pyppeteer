@@ -169,9 +169,21 @@ class Launcher(object):
             **options,
         )
 
+        def faux_run_until_complete(future, loop):
+            f = asyncio.ensure_future(future, loop=loop)
+            if f is not future:
+                f._log_destroy_pending = False
+            while not f.done():
+                loop._run_once()
+                if loop._stopping:
+                    break
+            if not f.done():
+                raise RuntimeError('Event loop stopped before Future completed.')
+            return f.result()
+
         def _close_process(*args: Any, **kwargs: Any) -> None:
             if not self.chromeClosed:
-                self._loop.run_until_complete(self.killChrome())
+                faux_run_until_complete(self.killChrome(), self._loop)
 
         # don't forget to close browser process
         if self.options.get('autoClose', True):
