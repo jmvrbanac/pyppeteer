@@ -182,8 +182,12 @@ class Launcher(object):
             return f.result()
 
         def _close_process(*args: Any, **kwargs: Any) -> None:
-            if not self.chromeClosed:
+            if self._loop.is_running():
+                logger.info('Event loop is running, using ensure_future')
                 faux_run_until_complete(self.killChrome(), self._loop)
+            else:
+                logger.info('Event loop isnt running, using run_until_complete')
+                self._loop.run_until_complete(self.killChrome())
 
         # don't forget to close browser process
         if self.options.get('autoClose', True):
