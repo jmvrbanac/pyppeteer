@@ -46,7 +46,8 @@ requirements = [
     'websockets',
     'appdirs',
     'urllib3',
-    'tqdm'
+    'tqdm',
+    'cffi',
 ]
 
 test_requirements = [

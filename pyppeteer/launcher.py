@@ -17,10 +17,11 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any, Dict, List, TYPE_CHECKING
 
-from pyppeteer import __pyppeteer_home__
+from pyppeteer import __pyppeteer_home__, prctl
 from pyppeteer.browser import Browser
 from pyppeteer.connection import Connection
 from pyppeteer.errors import BrowserError
@@ -33,6 +34,8 @@ if TYPE_CHECKING:
     from typing import Optional  # noqa: F401
 
 logger = logging.getLogger(__name__)
+
+browser_start_lock = threading.Lock()
 
 pyppeteer_home = Path(__pyppeteer_home__)
 CHROME_PROFILE_PATH = pyppeteer_home / '.dev_profile'
@@ -164,48 +167,58 @@ class Launcher(object):
             options['stdout'] = subprocess.PIPE
             options['stderr'] = subprocess.STDOUT
 
-        self.proc = subprocess.Popen(  # type: ignore
-            self.cmd,
-            **options,
-        )
 
-        def faux_run_until_complete(future, loop):
-            f = asyncio.ensure_future(future, loop=loop)
-            if f is not future:
-                f._log_destroy_pending = False
-            while not f.done():
-                loop._run_once()
-                if loop._stopping:
-                    break
-            if not f.done():
-                raise RuntimeError('Event loop stopped before Future completed.')
-            return f.result()
+        # Popen's preexec_fn isn't thread-safe. Locking the start to
+        # guarantee that we don't open more than one process
+        with browser_start_lock:
 
-        def _close_process(*args: Any, **kwargs: Any) -> None:
-            if self._loop.is_running():
-                logger.info('Event loop is running, using ensure_future')
-                faux_run_until_complete(self.killChrome(), self._loop)
-            else:
-                logger.info('Event loop isnt running, using run_until_complete')
-                self._loop.run_until_complete(self.killChrome())
+            def on_parent_exit():
+                prctl.set_pdeathsig(signal.SIGKILL)
 
-        # don't forget to close browser process
-        if self.options.get('autoClose', True):
-            atexit.register(_close_process)
-        if self.options.get('handleSIGINT', True):
-            signal.signal(signal.SIGINT, _close_process)
-        if self.options.get('handleSIGTERM', True):
-            signal.signal(signal.SIGTERM, _close_process)
-        if not sys.platform.startswith('win'):
-            # SIGHUP is not defined on windows
-            if self.options.get('handleSIGHUP', True):
-                signal.signal(signal.SIGHUP, _close_process)
+            self.proc = subprocess.Popen(  # type: ignore
+                self.cmd,
+                preexec_fn=on_parent_exit,
+                **options,
+            )
 
-        connectionDelay = self.options.get('slowMo', 0)
-        self.browserWSEndpoint = self._get_ws_endpoint()
-        logger.info(f'Browser listening on: {self.browserWSEndpoint}')
-        self.connection = Connection(
-            self.browserWSEndpoint, self._loop, connectionDelay)
+            def faux_run_until_complete(future, loop):
+                f = asyncio.ensure_future(future, loop=loop)
+                if f is not future:
+                    f._log_destroy_pending = False
+                while not f.done():
+                    loop._run_once()
+                    if loop._stopping:
+                        break
+                if not f.done():
+                    raise RuntimeError('Event loop stopped before Future completed.')
+                return f.result()
+
+            def _close_process(*args: Any, **kwargs: Any) -> None:
+                if self._loop.is_running():
+                    logger.info('Event loop is running, using ensure_future')
+                    faux_run_until_complete(self.killChrome(), self._loop)
+                else:
+                    logger.info('Event loop isnt running, using run_until_complete')
+                    self._loop.run_until_complete(self.killChrome())
+
+            # don't forget to close browser process
+            if self.options.get('autoClose', True):
+                atexit.register(_close_process)
+            if self.options.get('handleSIGINT', True):
+                signal.signal(signal.SIGINT, _close_process)
+            if self.options.get('handleSIGTERM', True):
+                signal.signal(signal.SIGTERM, _close_process)
+            if not sys.platform.startswith('win'):
+                # SIGHUP is not defined on windows
+                if self.options.get('handleSIGHUP', True):
+                    signal.signal(signal.SIGHUP, _close_process)
+
+            connectionDelay = self.options.get('slowMo', 0)
+            self.browserWSEndpoint = self._get_ws_endpoint()
+            logger.info(f'Browser listening on: {self.browserWSEndpoint}')
+            self.connection = Connection(
+                self.browserWSEndpoint, self._loop, connectionDelay)
+
         ignoreHTTPSErrors = bool(self.options.get('ignoreHTTPSErrors', False))
         setDefaultViewport = not self.options.get('appMode', False)
         browser = await Browser.create(
